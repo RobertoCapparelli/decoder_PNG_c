@@ -32,6 +32,13 @@ void parse_tEXt(PNG_decoder_t *decoder, unsigned char *chunk_data, size_t chunk_
 uint32_t to_big_endian(uint8_t *bytes);
 void print_PNG_info(PNG_decoder_t *decoder);
 int decompress_IDAT(PNG_decoder_t *decoder, unsigned char **out_data, size_t *out_size);
+unsigned char *apply_filters(PNG_decoder_t *decoder, unsigned char *decompressed_data);
+void no_filter(unsigned char *output, unsigned char *scanline, size_t bytes_per_pixel, size_t width);
+void sub_filter(unsigned char *output, unsigned char *scanline, size_t bytes_per_pixel, size_t width);
+void up_filter(unsigned char *output, unsigned char *scanline, unsigned char *prev_scanline, size_t bytes_per_pixel, size_t width);
+void average_filter(unsigned char *output, unsigned char *scanline, unsigned char *prev_scanline, size_t bytes_per_pixel, size_t width);
+unsigned char paeth_predictor(unsigned char left, unsigned char up, unsigned char upper_left);
+void paeth_filter(unsigned char *output, unsigned char *scanline, unsigned char *prev_scanline, size_t bytes_per_pixel, size_t width);
 
 #pragma endregion
 
@@ -62,15 +69,17 @@ int main(int argc, char *argv[])
     }
     printf("\nIDAT Data Size: %zu bytes\n", decoder.idat_size);
 
-    //Decompression
+    // Decompression
     unsigned char *decompressed_data = NULL;
     size_t decompressed_size = 0;
 
-    if (decompress_IDAT(&decoder, &decompressed_data, &decompressed_size) != 0) {
+    if (decompress_IDAT(&decoder, &decompressed_data, &decompressed_size) != 0)
+    {
         fprintf(stderr, "Failed to decompress IDAT data.\n");
         free(decoder.data);
         free(decoder.idat_data);
-        for (size_t i = 0; i < decoder.text_count; i++) {
+        for (size_t i = 0; i < decoder.text_count; i++)
+        {
             free(decoder.texts[i]);
         }
         free(decoder.texts);
@@ -78,6 +87,15 @@ int main(int argc, char *argv[])
     }
 
     printf("\nDecompressed Data Size: %zu bytes\n", decompressed_size);
+
+    // Apply filters
+    unsigned char *filtered_data = apply_filters(&decoder, decompressed_data);
+    if (!filtered_data)
+    {
+        fprintf(stderr, "Failed to apply filters.\n");
+        // free(decompressed_data);
+        return EXIT_FAILURE;
+    }
 
     // FREE
     free(decompressed_data);
@@ -229,47 +247,49 @@ void parse_tEXt(PNG_decoder_t *decoder, unsigned char *chunk_data, size_t chunk_
     decoder->texts[decoder->text_count][chunk_size] = '\0';
     decoder->text_count++;
 }
-int decompress_IDAT(PNG_decoder_t *decoder, unsigned char **out_data, size_t *out_size) {
+int decompress_IDAT(PNG_decoder_t *decoder, unsigned char **out_data, size_t *out_size)
+{
 
-    //STANDARD METHOD FROM .zlib IN C FOR DECOMPRESSION
+    // STANDARD METHOD FROM .zlib IN C FOR DECOMPRESSION
 
-    z_stream stream;
+    z_stream stream; // struct of zlib for compress/decompress data
     memset(&stream, 0, sizeof(stream));
 
-    if (inflateInit(&stream) != Z_OK) {
+    if (inflateInit(&stream) != Z_OK)
+    {
         fprintf(stderr, "Failed to initialize zlib for decompression.\n");
         return -1;
     }
 
     // Imposta l'input (dati IDAT compressi)
-    stream.next_in = decoder->idat_data;
-    stream.avail_in = decoder->idat_size;
+    stream.next_in = decoder->idat_data;  // stream.next_in: Pointer data to decompress
+    stream.avail_in = decoder->idat_size; // stream.avail_in: data size
 
-    // Alloca un buffer per i dati decompressi (dimensione approssimativa: width * height * 4 bytes per pixel)
-    size_t buffer_size = decoder->width * decoder->height * 4 + decoder->height; // Include byte filtro
+    // buffer for decompressed data
+    size_t buffer_size = decoder->width * decoder->height * 4 + decoder->height; // + decoder->height: for add filter
     *out_data = (unsigned char *)malloc(buffer_size);
-    if (!(*out_data)) {
+    if (!(*out_data))
+    {
         fprintf(stderr, "Failed to allocate memory for decompressed data.\n");
         inflateEnd(&stream);
         return -1;
     }
 
-    stream.next_out = *out_data;
-    stream.avail_out = buffer_size;
+    stream.next_out = *out_data;    // pointer to buffer for decompressed data (not yet decompressed)
+    stream.avail_out = buffer_size; // data size
 
-    // Decomprime i dati
-    int ret = inflate(&stream, Z_FINISH);
-    if (ret != Z_STREAM_END) {
+    // Decompress data
+    int ret = inflate(&stream, Z_FINISH); // inflate: decompress data from stream.next_in to stream.next_out
+    if (ret != Z_STREAM_END)
+    {
         fprintf(stderr, "Failed to decompress IDAT data: %d\n", ret);
-        free(*out_data);
+        // free(*out_data);
         inflateEnd(&stream);
         return -1;
     }
 
-    // Ritorna la dimensione effettiva dei dati decompressi
     *out_size = stream.total_out;
 
-    // Libera risorse zlib
     inflateEnd(&stream);
 
     return 0;
@@ -277,6 +297,160 @@ int decompress_IDAT(PNG_decoder_t *decoder, unsigned char **out_data, size_t *ou
 
 #pragma endregion
 
+#pragma region Filters
+void no_filter(unsigned char *output, unsigned char *scanline, size_t bytes_per_pixel, size_t width)
+{
+    memcpy(output, scanline, width * bytes_per_pixel);
+}
+void sub_filter(unsigned char *output, unsigned char *scanline, size_t bytes_per_pixel, size_t width)
+{
+    for (size_t x = 0; x < width; x++)
+    {
+        for (size_t y = 0; y < bytes_per_pixel; y++)
+        {
+            unsigned char left = (x == 0) ? 0 : output[(x - 1) * bytes_per_pixel + y];
+            output[x * bytes_per_pixel + y] = scanline[x * bytes_per_pixel + y] + left;
+        }
+    }
+}
+void up_filter(unsigned char *output, unsigned char *scanline, unsigned char *prev_scanline, size_t bytes_per_pixel, size_t width)
+{
+    for (size_t x = 0; x < width * bytes_per_pixel; x++)
+    {
+        unsigned char up = (prev_scanline == NULL) ? 0 : prev_scanline[x];
+        output[x] = scanline[x] + up;
+    }
+}
+void average_filter(unsigned char *output, unsigned char *scanline, unsigned char *prev_scanline, size_t bytes_per_pixel, size_t width)
+{
+    // reconstructed = raw + ((left + up) / 2)
+
+    for (size_t x = 0; x < width; x++)
+    {
+        for (size_t y = 0; y < bytes_per_pixel; y++)
+        {
+            unsigned char left = (x == 0) ? 0 : output[(x - 1) * bytes_per_pixel + y];
+            unsigned char up = (prev_scanline == NULL) ? 0 : prev_scanline[x * bytes_per_pixel + y];
+
+            output[x * bytes_per_pixel + y] = scanline[x * bytes_per_pixel + y] + ((left + up) / 2);
+        }
+    }
+}
+unsigned char paeth_predictor(unsigned char left, unsigned char up, unsigned char upper_left)
+{
+    // The prediction minimizes the sum of absolute differences between the actual value and the three neighbors.
+
+    int p = left + up - upper_left;
+    int pa = abs(p - left);
+    int pb = abs(p - up);
+    int pc = abs(p - upper_left);
+
+    // Return the neighbor (left, up, or upper_left) with the smallest difference (pa, pb, pc).
+    if (pa <= pb && pa <= pc)
+        return left;
+    else if (pb <= pc)
+        return up;
+    else
+        return upper_left;
+}
+void paeth_filter(unsigned char *output, unsigned char *scanline, unsigned char *prev_scanline, size_t bytes_per_pixel, size_t width)
+{
+    // reconstructed = raw + predicted
+
+    for (size_t x = 0; x < width; x++)
+    {
+        for (size_t y = 0; y < bytes_per_pixel; y++)
+        {
+            unsigned char left = (x == 0) ? 0 : output[(x - 1) * bytes_per_pixel + y];
+            unsigned char up = (prev_scanline == NULL) ? 0 : prev_scanline[x * bytes_per_pixel + y];
+            unsigned char upper_left = (x == 0 || prev_scanline == NULL) ? 0 : prev_scanline[(x - 1) * bytes_per_pixel + y];
+
+            unsigned char predicted = paeth_predictor(left, up, upper_left);
+            output[x * bytes_per_pixel + y] = scanline[x * bytes_per_pixel + y] + predicted;
+        }
+    }
+}
+
+unsigned char *apply_filters(PNG_decoder_t *decoder, unsigned char *decompressed_data)
+{
+    /*Calculate the number of bytes per pixel based on the bit depth and color type.
+        decoder->bit_depth / 8: Converts bit depth (8 or 16 bits per channel) into bytes per channel.
+        decoder->color_type == 2: Checks if the color type is Truecolor (RGB, 3 channels).
+       If Truecolor, multiplies by 3 to account for red, green, and blue channels, if 1 channel multiplies to 1.
+
+     TODO: Limitations
+     This calculation assumes only Truecolor (RGB) and single-channel formats.
+     It does not handle other valid PNG color types, such as:
+       - Truecolor with alpha (RGBA, 4 channels)
+       - Grayscale with alpha (2 channels) */
+    size_t bytes_per_pixel = (decoder->bit_depth / 8) * ((decoder->color_type == 2) ? 3 : 1);
+
+    size_t scanline_size = decoder->width * bytes_per_pixel + 1;
+
+    unsigned char *output = (unsigned char *)malloc(decoder->width * decoder->height * bytes_per_pixel);
+    if (!output)
+    {
+        fprintf(stderr, "Failed to allocate memory for filtered image.\n");
+        return NULL;
+    }
+
+    unsigned char *prev_scanline = NULL;
+    unsigned char *current_output = output;
+
+    size_t filter_counts[5] = {0};
+
+    for (size_t y = 0; y < decoder->height; y++)
+    {
+        unsigned char filter_type = decompressed_data[y * scanline_size];
+        if (filter_type > 4)
+        {
+            fprintf(stderr, "Invalid filter type: %u at scanline %zu\n", filter_type, y);
+        }
+    }
+    for (size_t y = 0; y < decoder->height; y++)
+    {
+        unsigned char filter_type = decompressed_data[y * scanline_size];
+        unsigned char *scanline = decompressed_data + y * scanline_size + 1;
+
+        filter_counts[filter_type]++;
+
+        switch (filter_type)
+        {
+        case 0:
+            no_filter(current_output, scanline, bytes_per_pixel, decoder->width);
+            break;
+        case 1:
+            sub_filter(current_output, scanline, bytes_per_pixel, decoder->width);
+            break;
+        case 2:
+            up_filter(current_output, scanline, prev_scanline, bytes_per_pixel, decoder->width);
+            break;
+        case 3:
+            average_filter(current_output, scanline, prev_scanline, bytes_per_pixel, decoder->width);
+            break;
+        case 4:
+            paeth_filter(current_output, scanline, prev_scanline, bytes_per_pixel, decoder->width);
+            break;
+        default:
+            fprintf(stderr, "Unsupported filter type: %u\n", filter_type);
+            free(output);
+            return NULL;
+        }
+
+        prev_scanline = current_output;
+        current_output += decoder->width * bytes_per_pixel;
+    }
+
+    // Print filter counts
+    printf("Filter Counts:\n");
+    for (size_t i = 0; i < 5; i++)
+    {
+        printf("Filter %zu: %zu times\n", i, filter_counts[i]);
+    }
+
+    return output;
+}
+#pragma endregion
 #pragma region Utilities
 // __builtin_bswap32 is highly optimized and translates directly to
 // architecture-specific assembly instructions.
