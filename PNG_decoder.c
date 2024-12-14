@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+
+//todo: apply check for index- color, parse chunk PLTE.
+//get color palette and apply to filter!
 typedef struct PNG_decoder
 {
     unsigned char *data;
