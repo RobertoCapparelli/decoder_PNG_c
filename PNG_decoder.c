@@ -4,9 +4,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-
-//todo: apply check for index- color, parse chunk PLTE.
-//get color palette and apply to filter!
 typedef struct PNG_decoder
 {
     unsigned char *data;
@@ -91,6 +88,7 @@ int main(int argc, char *argv[])
 
     printf("\nDecompressed Data Size: %zu bytes\n", decompressed_size);
 
+
     // Apply filters
     unsigned char *filtered_data = apply_filters(&decoder, decompressed_data);
     if (!filtered_data)
@@ -165,7 +163,7 @@ void parse_chunks(PNG_decoder_t *decoder)
 {
     while (decoder->offset < decoder->data_size)
     {
-        // GOTO line 139 for explanation
+        // GOTO line 478 for explanation
         uint32_t chunk_size = to_big_endian(decoder->data + decoder->offset);
         decoder->offset += 4;
 
@@ -216,7 +214,7 @@ void parse_chunks(PNG_decoder_t *decoder)
    decoder->height = (chunk_data[4] << 24) | (chunk_data[5] << 16) |
                      (chunk_data[6] << 8) | chunk_data[7]; */
 
-// Not a good implement, use memcpy!        GOTO line 185
+// Not a good implement, use memcpy!
 
 void parse_IHDR(PNG_decoder_t *decoder, unsigned char *chunk_data)
 {
@@ -264,7 +262,7 @@ int decompress_IDAT(PNG_decoder_t *decoder, unsigned char **out_data, size_t *ou
         return -1;
     }
 
-    // Imposta l'input (dati IDAT compressi)
+    //Stream.in
     stream.next_in = decoder->idat_data;  // stream.next_in: Pointer data to decompress
     stream.avail_in = decoder->idat_size; // stream.avail_in: data size
 
@@ -386,9 +384,31 @@ unsigned char *apply_filters(PNG_decoder_t *decoder, unsigned char *decompressed
      It does not handle other valid PNG color types, such as:
        - Truecolor with alpha (RGBA, 4 channels)
        - Grayscale with alpha (2 channels) */
-    size_t bytes_per_pixel = (decoder->bit_depth / 8) * ((decoder->color_type == 2) ? 3 : 1);
+    size_t bytes_per_pixel;
 
-    size_t scanline_size = decoder->width * bytes_per_pixel + 1;
+    switch (decoder->color_type)
+    {
+    case 0: // Grayscale
+        bytes_per_pixel = (decoder->bit_depth <= 8) ? 1 : 2;
+        break;
+    case 2: // Truecolor (RGB)
+        bytes_per_pixel = (decoder->bit_depth <= 8) ? 3 : 6;
+        break;
+    case 3: // Indexed-color (palette)
+        bytes_per_pixel = 1; // Always 1 byte per pixel (index in palette)
+        break;
+    case 4: // Grayscale + Alpha
+        bytes_per_pixel = (decoder->bit_depth <= 8) ? 2 : 4;
+        break;
+    case 6: // Truecolor + Alpha (RGBA)
+        bytes_per_pixel = (decoder->bit_depth <= 8) ? 4 : 8;
+        break;
+    default:
+        fprintf(stderr, "Unsupported color type: %u\n", decoder->color_type);
+        return NULL;
+    }
+
+    size_t scanline_size = ((decoder->width * decoder->bit_depth + 7) / 8) * bytes_per_pixel + 1;
 
     unsigned char *output = (unsigned char *)malloc(decoder->width * decoder->height * bytes_per_pixel);
     if (!output)
@@ -455,13 +475,13 @@ unsigned char *apply_filters(PNG_decoder_t *decoder, unsigned char *decompressed
 }
 #pragma endregion
 #pragma region Utilities
-// __builtin_bswap32 is highly optimized and translates directly to
-// architecture-specific assembly instructions.
-// For example, on x86, it compiles to a single BSWAP instruction.
-// It ensures portability by working across different platforms
-// and architectures, efficiently handling byte swapping without
-// the need for manual implementation.
-// Using __builtin_bswap32 simplifies code and reduces complexity.
+/* __builtin_bswap32 is highly optimized and translates directly to
+     architecture-specific assembly instructions.
+     For example, on x86, it compiles to a single BSWAP instruction.
+     It ensures portability by working across different platforms
+     and architectures, efficiently handling byte swapping without
+     the need for manual implementation.
+     Using __builtin_bswap32 simplifies code and reduces complexity. */
 uint32_t to_big_endian(uint8_t *bytes)
 {
     uint32_t value;
